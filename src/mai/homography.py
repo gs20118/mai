@@ -20,6 +20,25 @@ class HomographyError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class AxisConstraint:
+    """An image point whose arena X *or* Y is known, but not both.
+
+    The arena's printed border ticks are exactly this: a tick on the left border
+    marking the y=80 band boundary pins that image point to Y=80, while its X is
+    only "somewhere on the border" and is not known.
+
+    Half a correspondence is still worth having. It is linear in H -- from
+    Y = (h2.p)/(h3.p), fixing Y = Y0 gives (h2 - Y0*h3).p = 0 -- so it drops straight
+    into the DLT next to the full point correspondences. That is what lets us pin
+    down a corner of the arena whose ArUco marker is occluded.
+    """
+
+    image_xy: np.ndarray
+    axis: int  # 0 fixes X, 1 fixes Y
+    value_cm: float
+
+
+@dataclass(frozen=True)
 class Homography:
     matrix: np.ndarray  # 3x3, undistorted image px -> arena cm
     rms_cm: float  # reprojection error of the marker corners, in cm
@@ -139,6 +158,115 @@ def solve(
         inliers=int(inlier_mask.sum()),
         total=len(errors),
         marker_ids=distinct,
+    )
+
+
+def solve_constrained(
+    image_points: np.ndarray,
+    world_points: np.ndarray,
+    axis_constraints: list[AxisConstraint],
+    marker_ids: list[int],
+    min_markers: int = 2,
+) -> Homography:
+    """Fit image px -> arena cm from full correspondences PLUS one-axis constraints.
+
+    For the oblique view, where a building buries one corner marker. Three markers
+    still fit a homography, and it will look healthy -- ~1cm reprojection error --
+    because it is only checking itself where it has evidence. Out in the corner it
+    cannot see, it drifts: on this footage, by ~13cm, which is a quarter of a runway
+    zone. The printed ticks put evidence exactly there.
+
+    Everything is linear, so this is one DLT and an SVD:
+        full correspondence -> 2 rows    (X and Y both known)
+        axis constraint     -> 1 row     (only one of them known)
+
+    Coordinates are pre-normalised to keep the system well conditioned. Hartley's
+    data-dependent normalisation cannot be used as-is, because an axis constraint has
+    no second coordinate to take a centroid over -- so we use a fixed normalisation
+    onto roughly [-1, 1] instead, which is enough.
+    """
+    image_points = np.asarray(image_points, dtype=np.float64).reshape(-1, 2)
+    world_points = np.asarray(world_points, dtype=np.float64).reshape(-1, 2)
+    distinct = sorted(set(marker_ids))
+
+    if len(distinct) < min_markers:
+        raise HomographyError(
+            f"saw {len(distinct)} marker(s) {distinct}, need at least {min_markers} "
+            "even with tick constraints"
+        )
+
+    rows_available = 2 * len(image_points) + len(axis_constraints)
+    if rows_available < 8:
+        raise HomographyError(
+            f"only {rows_available} equations for 8 unknowns "
+            f"({len(image_points)} points, {len(axis_constraints)} tick constraints)"
+        )
+
+    # Fixed normalisation: image px onto ~[-1,1], arena cm onto ~[-1,1].
+    scale_u = max(np.abs(image_points[:, 0]).max(), 1.0)
+    scale_v = max(np.abs(image_points[:, 1]).max(), 1.0)
+    if axis_constraints:
+        tick_xy = np.array([c.image_xy for c in axis_constraints], dtype=np.float64)
+        scale_u = max(scale_u, np.abs(tick_xy[:, 0]).max())
+        scale_v = max(scale_v, np.abs(tick_xy[:, 1]).max())
+    normalize_image = np.diag([1.0 / scale_u, 1.0 / scale_v, 1.0])
+    normalize_world = np.diag([1.0 / 250.0, 1.0 / 200.0, 1.0])
+
+    rows = []
+    for (u, v), (x_cm, y_cm) in zip(image_points, world_points):
+        un, vn = u / scale_u, v / scale_v
+        xn, yn = x_cm / 250.0, y_cm / 200.0
+        rows.append([un, vn, 1, 0, 0, 0, -xn * un, -xn * vn, -xn])
+        rows.append([0, 0, 0, un, vn, 1, -yn * un, -yn * vn, -yn])
+
+    for constraint in axis_constraints:
+        u, v = constraint.image_xy
+        un, vn = u / scale_u, v / scale_v
+        if constraint.axis == 0:
+            xn = constraint.value_cm / 250.0
+            rows.append([un, vn, 1, 0, 0, 0, -xn * un, -xn * vn, -xn])
+        else:
+            yn = constraint.value_cm / 200.0
+            rows.append([0, 0, 0, un, vn, 1, -yn * un, -yn * vn, -yn])
+
+    _, _, right = np.linalg.svd(np.array(rows, dtype=np.float64))
+    normalized = right[-1].reshape(3, 3)
+
+    matrix = np.linalg.inv(normalize_world) @ normalized @ normalize_image
+    if abs(matrix[2, 2]) < 1e-12:
+        raise HomographyError("degenerate homography from the constrained fit")
+    matrix = matrix / matrix[2, 2]
+
+    projected = _transform(image_points, matrix)
+    errors = np.linalg.norm(projected - world_points, axis=1)
+
+    return Homography(
+        matrix=matrix,
+        rms_cm=float(np.sqrt(np.mean(errors**2))),
+        max_error_cm=float(errors.max()) if len(errors) else 0.0,
+        inliers=len(errors),
+        total=len(errors),
+        marker_ids=distinct,
+    )
+
+
+def axis_residuals(
+    solved: Homography, axis_constraints: list[AxisConstraint]
+) -> np.ndarray:
+    """Error, in cm, of each one-axis constraint under a fitted homography.
+
+    The honest check on an oblique fit. Marker reprojection error only measures the
+    fit where the markers are; these measure it where they aren't.
+    """
+    if not axis_constraints:
+        return np.empty(0)
+    points = np.array([c.image_xy for c in axis_constraints], dtype=np.float64)
+    projected = solved.to_world(points)
+    return np.array(
+        [
+            projected[i, constraint.axis] - constraint.value_cm
+            for i, constraint in enumerate(axis_constraints)
+        ]
     )
 
 
