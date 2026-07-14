@@ -1,0 +1,63 @@
+# Camera intrinsics and lens distortion, one profile per capture mode.
+#
+# This header is preserved when the tuner rewrites the file; the values below it
+# are not, so keep explanation up here rather than as inline comments.
+#
+# PROFILES. DJI uses a different sensor crop and field of view for photo vs video,
+# so their intrinsics differ. Applying the video profile to photo footage adds a
+# systematic warp that is nearly invisible by eye and biases every zone assignment.
+# Tag each capture with the profile it was shot in.
+#
+# TUNED, NOT CALIBRATED. We have no chessboard. Dial these in by eye with
+#   python -m mai.cli.tune_undistort --image <frame> --profile video_4k
+# on TRAIN footage, save, then apply the identical values to TEST footage.
+#
+# WHAT ACTUALLY MATTERS. We only ever map onto a plane (the arena floor), and a
+# planar homography absorbs any linear camera matrix. So fx/fy/cx/cy do NOT have to
+# be physically accurate -- errors there get soaked up by H. Only the NONLINEAR
+# terms (k1, k2, k3, p1, p2) must be right, because a homography cannot represent
+# radial distortion. The tuner therefore has exactly one job: make straight lines
+# in the arena come out straight.
+#
+# ALPHA IS 1.0 ON PURPOSE. getOptimalNewCameraMatrix takes alpha=0 to crop away
+# invalid pixels and alpha=1 to keep the full field of view. Cropping is the usual
+# default, but here it would eat the frame corners -- which is exactly where the
+# four ArUco markers live, and losing even one means the frame cannot be registered
+# at all. So we keep the whole field of view. Undistorter separately grows the
+# output canvas to stop alpha=1 from shrinking the focal length and quietly
+# downsampling us; see the comment in undistort.py.
+#
+# STARTING VALUES assume ~84 deg horizontal FOV at 4K, fx = (3840/2)/tan(42deg),
+# and zero distortion, on the hypothesis that DJI already corrects the lens
+# in-camera. Test that hypothesis with the tuner's straightness probe before
+# believing it.
+
+profiles:
+  video_4k:
+    image_size:
+    - 3840
+    - 2160
+    fx: 2130.0
+    fy: 2130.0
+    cx: 1920.0
+    cy: 1080.0
+    k1: 0.0
+    k2: 0.0
+    p1: 0.0
+    p2: 0.0
+    k3: 0.0
+    alpha: 1.0
+  photo_4k:
+    image_size:
+    - 4032
+    - 3024
+    fx: 2240.0
+    fy: 2240.0
+    cx: 2016.0
+    cy: 1512.0
+    k1: 0.0
+    k2: 0.0
+    p1: 0.0
+    p2: 0.0
+    k3: 0.0
+    alpha: 1.0

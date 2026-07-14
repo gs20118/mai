@@ -1,0 +1,4 @@
+# The repo lives on a Windows mount, where editors keep rewriting files as CRLF.
+# Left alone, that turns a one-line edit into an 890-line diff. Normalise to LF in
+# the index regardless of what the working tree does.
+* text=auto eol=lf

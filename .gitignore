@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+data/
+outputs/
+models/
+*.pt
+*.onnx
+
+.pytest_cache/

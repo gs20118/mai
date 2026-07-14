@@ -1,0 +1,6 @@
+# opencv-contrib-python, NOT opencv-python: cv2.aruco and cv2.SIFT live in contrib.
+# The two packages conflict; installing both leaves a broken cv2.
+opencv-contrib-python>=4.8
+numpy>=1.24
+pyyaml>=6.0
+pytest>=7.4
