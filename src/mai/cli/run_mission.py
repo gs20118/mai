@@ -36,35 +36,14 @@ UXO_NAMES = ["misile", "dumb", "cluster"]
 FOCAL_PX = 2194.0  # measured from the oblique clip; same camera, same zoom
 
 
-def register_fast(frame, arena, undistorter, detector, aruco_scale=0.5):
-    """Register a frame, detecting the markers at reduced resolution.
-
-    ArUco on a full 4K frame costs ~145ms and dominates everything else in the pipeline.
-    The markers are 102px, so at half resolution they are still 51px -- comfortably above
-    the ~40px floor our tuned detector handles -- and the work drops ~4x. Corners come
-    back scaled up, and the homography then has the last word anyway: we gate on its
-    reprojection error, so a sloppy corner cannot pass unnoticed.
-    """
-    undistorted = undistorter(frame.image)
-    if aruco_scale < 1.0:
-        small = cv2.resize(undistorted, None, fx=aruco_scale, fy=aruco_scale,
-                           interpolation=cv2.INTER_AREA)
-        detections = aruco.detect(small, detector, keep_ids=set(arena.markers))
-        detections = [
-            aruco.Detection(id=d.id, corners=d.corners / aruco_scale) for d in detections
-        ]
-    else:
-        detections = aruco.detect(undistorted, detector, keep_ids=set(arena.markers))
-
-    image_points, world_points = aruco.correspondences(detections, arena)
-    solved = homography.solve(image_points, world_points, [d.id for d in detections])
-    return undistorted, solved
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", required=True)
-    parser.add_argument("--output", default="outputs/mission")
+    parser.add_argument(
+        "--output",
+        default=None,
+        help="Defaults to outputs/mission/<video name>/, so runs never overwrite each other.",
+    )
     parser.add_argument("--mission-code", default="LKUSDC80")
     parser.add_argument("--crater-weights", default="runs/detect/runs/crater/weights/best.pt")
     parser.add_argument(
@@ -90,12 +69,19 @@ def main() -> int:
     detector = aruco.build_detector(arena.dictionary)
     models = {"crater": YOLO(args.crater_weights), "uxo": YOLO(args.uxo_weights)}
     airfield = arena.airfield_zones
-    output = Path(args.output)
+    output = Path(args.output or f"outputs/mission/{Path(args.source).stem}")
     output.mkdir(parents=True, exist_ok=True)
 
-    warm = np.zeros((449, 299, 3), np.uint8)
+    # Warm up on the SHAPES the mission will actually feed. cuDNN autotunes per input
+    # geometry, and the runway crops (~299x449) and taxiway crops (~549x449) are different
+    # shapes -- warm only one of them and the first real frame still pays a ~3.3s tuning
+    # cost, which then gets averaged into the per-frame latency and, on a 5-frame video,
+    # quadruples it. The reported number would be an artefact of our own instrumentation.
+    warm = [np.zeros((449, 299, 3), np.uint8) for _ in arena.runway_zones]
+    warm += [np.zeros((449, 549, 3), np.uint8) for _ in arena.taxiway_zones]
     for name, imgsz in (("crater", 512), ("uxo", 640)):
-        models[name].predict([warm] * 4, imgsz=imgsz, device=0, verbose=False, half=True)
+        for _ in range(2):
+            models[name].predict(warm, imgsz=imgsz, device=0, verbose=False, half=True)
 
     print(f"source: {args.source}")
     print(f"models: crater={Path(args.crater_weights).parts[-3]} "
@@ -107,6 +93,8 @@ def main() -> int:
     used = 0
     rejected = 0
     timings = defaultdict(float)
+    levels: dict[tuple[int, bool], int] = defaultdict(int)
+    reasons: dict[str, int] = defaultdict(int)
     best_frame = None
 
     for frame in frames.iter_frames(args.source, sample_sec=args.sample_sec):
@@ -115,15 +103,20 @@ def main() -> int:
 
         t0 = time.perf_counter()
         try:
-            undistorted, solved = register_fast(
+            undistorted, solved, n_markers, n_ticks = topview.register_robust(
                 frame, arena, undistorter, detector, args.aruco_scale
             )
-        except homography.HomographyError:
+        except homography.HomographyError as error:
             rejected += 1
+            reasons[str(error)[:60]] += 1
             continue
-        if solved.rms_cm > args.max_rms_cm:
+        # A 4-marker fit is checked by its own reprojection error; a tick-rescued fit is
+        # already checked against the printed boundaries inside register_robust.
+        if n_ticks == 0 and solved.rms_cm > args.max_rms_cm:
             rejected += 1
+            reasons[f"reprojection RMS > {args.max_rms_cm}cm"] += 1
             continue
+        levels[(n_markers, n_ticks > 0)] += 1
         t1 = time.perf_counter()
 
         px_per_cm = topview.native_px_per_cm(arena, solved)
@@ -181,10 +174,16 @@ def main() -> int:
             best_frame = (undistorted, solved, px_per_cm, frame.index)
 
     if not used:
-        print(f"No frame could be registered ({rejected} rejected).")
+        print(f"No frame could be registered ({rejected} rejected):")
+        for reason, count in reasons.items():
+            print(f"    {count}x  {reason}")
         return 1
 
-    print(f"{used} frames registered and analysed ({rejected} rejected)\n")
+    print(f"{used} frames registered and analysed ({rejected} rejected)")
+    for (n_markers, used_ticks), count in sorted(levels.items()):
+        how = f"{n_markers} markers" + (" + printed ticks" if used_ticks else "")
+        print(f"    {count:2d} frames via {how}")
+    print()
 
     # --- resolve the votes ---
     threshold = max(1, int(round(args.vote * used)))
