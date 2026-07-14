@@ -104,8 +104,10 @@ def world_to_undistorted(world_cm, scene, undistorter: Undistorter) -> np.ndarra
     return project(transfer, ideal)
 
 
-def test_all_four_markers_are_found(registration):
-    assert registration.marker_ids == [0, 1, 2, 3]
+def test_all_four_markers_are_found(arena: Arena, registration):
+    # IDs come from the measured arena config (they are 1..4 on the real board),
+    # so assert against the config rather than hard-coding them.
+    assert registration.marker_ids == sorted(arena.markers)
 
 
 def test_homography_recovers_arena_coordinates(registration):
@@ -141,8 +143,18 @@ def test_undistortion_is_load_bearing(arena: Arena):
         frame, arena, Undistorter(make_profile(distortion=(0, 0, 0, 0, 0))), detector
     )
 
-    assert corrected.homography.rms_cm < 0.5
-    assert uncorrected.homography.rms_cm > 5 * corrected.homography.rms_cm
+    # Assert on MAX error, not RMS. rms_cm is computed over RANSAC's inliers only, so
+    # it flatters a bad fit by ignoring the very correspondences the distortion threw
+    # off -- here it hides a 3cm error behind a 0.29cm RMS. Max error is also the
+    # quantity that actually matters: it is what pushes an object into the wrong zone.
+    assert corrected.homography.max_error_cm < 0.5
+    assert corrected.homography.inliers == corrected.homography.total
+
+    # Uncorrected, the fit is off by centimetres at the worst point, and RANSAC has to
+    # discard correspondences it cannot reconcile.
+    assert uncorrected.homography.max_error_cm > 2.0
+    assert uncorrected.homography.inliers < uncorrected.homography.total
+    assert uncorrected.homography.max_error_cm > 10 * corrected.homography.max_error_cm
 
 
 def test_objects_land_in_their_true_zones(arena: Arena, scene, registration, undistorter):

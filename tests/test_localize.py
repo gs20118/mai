@@ -113,7 +113,7 @@ def build_reference(arena: Arena, top, top_focal) -> tuple[Reference, float]:
         undistorter_for(TOP_IMAGE, top_focal),
         aruco.build_detector(arena.dictionary),
     )
-    assert registration.marker_ids == [0, 1, 2, 3]
+    assert registration.marker_ids == sorted(arena.markers)
 
     px_per_cm = topview.native_px_per_cm(arena, registration.homography)
     warped = topview.warp(
