@@ -191,6 +191,24 @@ zones:
   w: 160
   h: 80
   band: facility
+# Physical target sizes. The UXO figures are MEASURED FROM THE LABELS, not taken from
+# TASK.md, because TASK.md 8.3's table does not describe the props on the actual board.
+# It calls "dumb" a 44x44x93mm upright and "cluster" a 28x28x20mm cube; in reality dumb
+# is a small ball and cluster is a long object.
+#
+# The labels say so unambiguously. These objects stand on the ground, so a nadir bbox
+# carries the base PLUS a lean of height x distance/altitude -- and in the RW zones the
+# drone's nadir lies on the runway centreline, which makes bbox HEIGHT a lean-free
+# measure of the base and (width - height) a clean measure of the lean. Run that fit and
+# "dumb" comes out 6mm tall: it barely leans at all, in the very frames where the
+# missile leans 92mm. A 93mm upright cannot do that.
+#
+# Believing TASK.md here is not harmless -- the GSD report would size the whole UXO
+# mission against a 28mm cluster munition that does not exist, and name the wrong target
+# as the binding one. The real constraint is the DUMB ball at ~18px.
+#
+# Crater dimensions are the one part of TASK.md the data agrees with (measured
+# 100/248/409 cm^2 against a stated 101/239/358), so those are kept as specified.
 targets:
   crater_big:
     w_mm: 179.0
@@ -205,14 +223,14 @@ targets:
     d_mm: 99.0
     h_mm: 16.0
   uxo_misile:
-    w_mm: 50.0
-    d_mm: 50.0
-    h_mm: 115.0
+    w_mm: 54.0
+    d_mm: 54.0
+    h_mm: 92.0
   uxo_dumb:
-    w_mm: 44.0
-    d_mm: 44.0
-    h_mm: 93.0
+    w_mm: 36.0
+    d_mm: 36.0
+    h_mm: 6.0
   uxo_cluster:
-    w_mm: 28.0
-    d_mm: 28.0
-    h_mm: 20.5
+    w_mm: 60.0
+    d_mm: 60.0
+    h_mm: 59.0

@@ -151,6 +151,29 @@ def _solve_focal(matrix: np.ndarray, cx: float, cy: float) -> float:
     if not np.isfinite(scores[best]):
         raise PoseError("cannot solve for focal length from this homography")
 
+    # IDENTIFIABILITY, and this check is load-bearing. A low residual only says some
+    # focal length FITS; it does not say that focal length is DETERMINED. As the view
+    # approaches straight-down the orthonormality constraints stop depending on f at
+    # all -- every focal fits equally well -- and the minimum flattens into a valley.
+    # Argmin then returns whatever noise favoured. On the real nadir footage this
+    # silently produced focal=100px and a camera altitude of 20cm, with a residual
+    # small enough to sail through a threshold test. Nadir views do not need a pose,
+    # but returning nonsense instead of raising is the exact failure this project
+    # keeps guarding against.
+    #
+    # So measure the width of the valley: if a broad band of focal lengths all fit,
+    # the focal is unidentifiable and there is no answer to give.
+    tolerance = max(scores[best] * 10.0, 1e-4)
+    acceptable = grid[scores < tolerance]
+    if acceptable.size and acceptable.max() / acceptable.min() > 3.0:
+        raise PoseError(
+            f"focal length is not identifiable from this homography: everything from "
+            f"{acceptable.min():.0f}px to {acceptable.max():.0f}px fits equally well. "
+            "The view is too close to fronto-parallel for the orthonormality "
+            "constraints to say anything about f. A near-nadir view needs no pose -- "
+            "use the homography directly."
+        )
+
     # Refine around the winner.
     low = grid[max(best - 1, 0)]
     high = grid[min(best + 1, len(grid) - 1)]
