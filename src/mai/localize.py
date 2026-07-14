@@ -302,6 +302,96 @@ def localize(
     )
 
 
+def ground_correspondences(
+    frame: np.ndarray,
+    reference: Reference,
+    seed: np.ndarray,
+    exclude_bands: tuple[str, ...] = ("facility",),
+    ratio: float = 0.75,
+    ransac_px: float = 3.0,
+    max_side: int = 2000,
+) -> tuple[np.ndarray, np.ndarray]:
+    """SIFT correspondences from a frame to the reference map: (image px, arena cm).
+
+    A second, independent way to pin down a frame -- and a far denser one than the
+    fiducials. Four markers give 16 correspondences and the printed ticks give at most
+    12 half-constraints; this gives HUNDREDS of full ones, spread across the whole
+    board. That matters because fiducials are individually occludable (a building
+    already buries one marker) whereas no single obstruction hides hundreds of
+    features.
+
+    Two details do most of the work:
+
+    PRE-WARP. Matching a 45-degree view straight against a top-down map asks SIFT to
+    absorb the entire perspective change, which is past what it tolerates -- it found
+    211 inliers and landed 3.3cm out. Rectifying the frame first with the (imperfect)
+    seed homography leaves SIFT only the residual error to cope with: 591 inliers, and
+    1.7cm. The seed's own error does not propagate, because we map the matches back to
+    source-image pixels afterwards.
+
+    EXCLUDE THE BUILDINGS. A homography describes a PLANE. The facility bands hold
+    30-50cm structures, whose features sit well off that plane and drag the fit toward
+    a systematic bias. Masking them out took the error from 1.7cm to 1.1cm. The
+    markers and ticks, which sit on the border, constrain those bands instead.
+    """
+    px_per_cm = reference.px_per_cm
+    arena = reference.arena
+    scale = np.diag([px_per_cm, px_per_cm, 1.0])
+    to_canvas = scale @ seed
+    size = (
+        int(round(arena.width_cm * px_per_cm)),
+        int(round(arena.height_cm * px_per_cm)),
+    )
+    rectified = cv2.warpPerspective(frame, to_canvas, size)
+
+    mask = np.full(size[::-1], 255, np.uint8)
+    for zone in arena.zones:
+        if zone.band in exclude_bands:
+            x1, y1 = int(zone.x * px_per_cm), int(zone.y * px_per_cm)
+            x2, y2 = int(zone.x2 * px_per_cm), int(zone.y2 * px_per_cm)
+            mask[y1:y2, x1:x2] = 0
+
+    detector = cv2.SIFT_create(nfeatures=8000, contrastThreshold=0.015)
+    frame_kp, frame_desc = detector.detectAndCompute(
+        cv2.cvtColor(rectified, cv2.COLOR_BGR2GRAY), mask
+    )
+    ref_kp, ref_desc = detector.detectAndCompute(
+        cv2.cvtColor(reference.image, cv2.COLOR_BGR2GRAY), mask
+    )
+    if frame_desc is None or ref_desc is None or len(frame_desc) < 20:
+        raise LocalizationError("too few features to match against the reference map")
+
+    matcher = cv2.FlannBasedMatcher(dict(algorithm=1, trees=5), dict(checks=64))
+    good = [
+        first
+        for pair in matcher.knnMatch(frame_desc, ref_desc, k=2)
+        if len(pair) == 2
+        for first, second in [pair]
+        if first.distance < ratio * second.distance
+    ]
+    if len(good) < 30:
+        raise LocalizationError(f"only {len(good)} SIFT matches against the reference map")
+
+    canvas_points = np.float32([frame_kp[m.queryIdx].pt for m in good])
+    reference_points = np.float32([ref_kp[m.trainIdx].pt for m in good])
+    _, inlier_mask = cv2.findHomography(
+        canvas_points.reshape(-1, 1, 2),
+        reference_points.reshape(-1, 1, 2),
+        cv2.RANSAC,
+        ransac_px,
+    )
+    if inlier_mask is None:
+        raise LocalizationError("RANSAC failed on the reference-map matches")
+    keep = inlier_mask.reshape(-1).astype(bool)
+    if keep.sum() < 30:
+        raise LocalizationError(f"only {int(keep.sum())} inliers against the reference map")
+
+    # Back to SOURCE image pixels, so the seed's error never enters the final fit.
+    image_points = _apply(canvas_points[keep], np.linalg.inv(to_canvas))
+    arena_points = reference_points[keep] / px_per_cm
+    return image_points, arena_points
+
+
 def check_anchors(
     solved: Homography,
     frame_objects_px: np.ndarray,

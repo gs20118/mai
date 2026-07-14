@@ -36,13 +36,25 @@ from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
 import numpy as np
 
-from mai import aruco, frames, homography, pose as posemod, ticks, topview, viz, zones
+from mai import (
+    aruco,
+    frames,
+    homography,
+    localize,
+    pose as posemod,
+    ticks,
+    topview,
+    viz,
+    zones,
+)
 from mai.arena import Arena
+from mai.frames import Frame
 from mai.undistort import CameraProfile, Undistorter
 
 # How far above the board each class of zone reaches. Facility zones hold buildings
@@ -50,16 +62,49 @@ from mai.undistort import CameraProfile, Undistorter
 ZONE_HEIGHT_CM = {"facility": 55.0, "runway": 14.0, "taxiway_a": 14.0, "taxiway_b": 14.0}
 
 
-def register(image, arena, undistorter, detector):
-    """Homography from markers PLUS printed ticks, and the camera pose behind it."""
+@dataclass
+class Registration:
+    undistorted: np.ndarray
+    detections: list
+    ticks: list
+    sift_points: int
+    homography: object
+    tick_error_cm: float  # residual on the printed ticks
+    sift_error_cm: float  # residual on the SIFT correspondences
+    disagreement_cm: float  # how far the two independent sources are apart
+
+
+def register(image, arena, undistorter, detector, reference=None):
+    """Fuse three independent sources of geometry into one fit.
+
+    MARKERS are precise but sparse and easily hidden -- a building already buries one
+    of the four, and most frames show only two.
+
+    PRINTED TICKS pin the corners the markers cannot reach. But they are sparse too
+    (11 blobs), each gives only half a constraint, and each is individually
+    occludable, which is exactly the fragility that motivated adding a third source.
+
+    SIFT AGAINST THE NADIR TOP VIEW gives ~450 full correspondences spread across the
+    whole board. No single obstruction hides hundreds of features. Cross-validation
+    says it is in fact the MOST reliable of the three: a markers+SIFT fit explains the
+    ticks to ~0.8cm, while a markers+ticks fit misplaces the SIFT points by 2-4cm on
+    the two-marker frames. A correct homography has to explain both, and only one of
+    them does.
+
+    All three go into a single DLT (full correspondences contribute two rows, ticks
+    one). The residual on each source is reported separately, and their DISAGREEMENT
+    is the health check -- when independent evidence stops agreeing, something is
+    wrong and we would rather know than average it away.
+    """
     undistorted = undistorter(image)
     detections = aruco.detect(undistorted, detector, keep_ids=set(arena.markers))
     if len(detections) < 2:
         raise homography.HomographyError(
-            f"only {len(detections)} marker(s); need >=2 even with ticks"
+            f"only {len(detections)} marker(s); need >=2 to seed the fit"
         )
 
     image_points, world_points = aruco.correspondences(detections, arena)
+    marker_ids = [d.id for d in detections]
     seed, _ = cv2.findHomography(
         image_points.reshape(-1, 1, 2), world_points.reshape(-1, 1, 2)
     )
@@ -68,13 +113,66 @@ def register(image, arena, undistorter, detector):
 
     found = ticks.find(undistorted, seed, arena)
     constraints = ticks.constraints(found)
-    marker_ids = [d.id for d in detections]
 
-    solved = homography.solve_constrained(
-        image_points, world_points, constraints, marker_ids
+    sift_image = sift_arena = None
+    if reference is not None:
+        try:
+            sift_image, sift_arena = localize.ground_correspondences(
+                undistorted, reference, seed
+            )
+        except localize.LocalizationError:
+            sift_image = sift_arena = None
+
+    if sift_image is None and len(constraints) < 4:
+        raise homography.HomographyError(
+            "no SIFT reference match and too few ticks; cannot pin the far side"
+        )
+
+    all_image = image_points if sift_image is None else np.vstack([image_points, sift_image])
+    all_world = world_points if sift_arena is None else np.vstack([world_points, sift_arena])
+    solved = homography.solve_constrained(all_image, all_world, constraints, marker_ids)
+
+    tick_error = (
+        float(np.abs(homography.axis_residuals(solved, constraints)).max())
+        if constraints
+        else float("nan")
     )
-    residuals = homography.axis_residuals(solved, constraints)
-    return undistorted, detections, found, solved, residuals
+    sift_error = (
+        float(np.linalg.norm(solved.to_world(sift_image) - sift_arena, axis=1).max())
+        if sift_image is not None
+        else float("nan")
+    )
+
+    # Disagreement: refit on each source alone and see how far apart they place the
+    # arena. This is the only check neither source can fake -- a fit can always explain
+    # the evidence it was given, but it cannot fake agreeing with evidence it wasn't.
+    #
+    # Probed at the ZONE CENTRES, not the arena corners. The corners are the harshest
+    # extrapolation point for both fits and nothing is ever scored there; what we
+    # actually care about is whether the two agree where objects can be.
+    disagreement = float("nan")
+    if sift_image is not None and len(constraints) >= 4:
+        ticks_only = homography.solve_constrained(
+            image_points, world_points, constraints, marker_ids
+        )
+        sift_only = homography.solve_constrained(all_image, all_world, [], marker_ids)
+        probes = np.array([zone.center for zone in arena.zones], dtype=float)
+        disagreement = float(
+            np.linalg.norm(
+                ticks_only.to_world(sift_only.to_image(probes)) - probes, axis=1
+            ).max()
+        )
+
+    return Registration(
+        undistorted=undistorted,
+        detections=detections,
+        ticks=found,
+        sift_points=0 if sift_image is None else len(sift_image),
+        homography=solved,
+        tick_error_cm=tick_error,
+        sift_error_cm=sift_error,
+        disagreement_cm=disagreement,
+    )
 
 
 def main() -> int:
@@ -84,21 +182,52 @@ def main() -> int:
     parser.add_argument("--arena", default=None)
     parser.add_argument("--profile", default="video_4k")
     parser.add_argument("--per-video", type=int, default=3)
+    parser.add_argument(
+        "--reference",
+        default="data/raw/top_center_4.mp4",
+        help="A NADIR video, used to build the SIFT reference map. Registered on all "
+        "four markers, so it carries absolute arena coordinates. Pass 'none' to fall "
+        "back to markers+ticks alone.",
+    )
     parser.add_argument("--sample-sec", type=float, default=0.3)
     parser.add_argument(
         "--max-tick-error-cm",
         type=float,
         default=1.5,
-        help="Reject a frame whose printed-tick residual exceeds this. This is the "
-        "honest gate: marker reprojection error only checks the fit where the "
+        help="Reject a frame whose residual on the ticks or the SIFT map exceeds this. "
+        "Marker reprojection error is NOT the gate: it only checks the fit where the "
         "markers are, which on this view is exactly where it is already right.",
     )
     parser.add_argument("--pad-cm", type=float, default=5.0)
+    parser.add_argument(
+        "--max-disagreement-cm",
+        type=float,
+        default=6.0,
+        help="Reject a frame if the fiducials and the SIFT map place the arena more "
+        "than this far apart. Independent evidence that stops agreeing is the one "
+        "signal neither source can fake.",
+    )
     args = parser.parse_args()
 
     arena = Arena.from_yaml(args.arena) if args.arena else Arena.from_yaml()
     undistorter = Undistorter(CameraProfile.load(args.profile))
     detector = aruco.build_detector(arena.dictionary)
+
+    reference = None
+    if args.reference and args.reference.lower() != "none":
+        nadir = next(frames.iter_frames(args.reference, sample_sec=1.0))
+        anchor = topview.register(nadir, arena, undistorter, detector)
+        px_per_cm = topview.native_px_per_cm(arena, anchor.homography)
+        reference = localize.Reference(
+            topview.warp(anchor.undistorted, arena, anchor.homography, px_per_cm),
+            px_per_cm,
+            arena,
+        )
+        print(
+            f"reference map: {Path(args.reference).name} on markers "
+            f"{anchor.homography.marker_ids}, RMS {anchor.homography.rms_cm:.3f}cm, "
+            f"{reference.feature_count} SIFT features"
+        )
 
     output = Path(args.output)
     for sub in ("topview", "zones_flat", "zones_oblique", "qa"):
@@ -108,40 +237,56 @@ def main() -> int:
     candidates = []
     for frame in frames.iter_frames(source, sample_sec=args.sample_sec):
         try:
-            undistorted, detections, found, solved, residuals = register(
-                frame.image, arena, undistorter, detector
-            )
+            result = register(frame.image, arena, undistorter, detector, reference)
         except homography.HomographyError as error:
             print(f"  f{frame.index:05d}: rejected ({error})")
             continue
 
-        worst = float(np.abs(residuals).max()) if len(residuals) else np.inf
-        if worst > args.max_tick_error_cm:
-            print(f"  f{frame.index:05d}: rejected (tick error {worst:.2f}cm)")
-            continue
-        candidates.append(
-            (frame, undistorted, detections, found, solved, worst,
-             frames.sharpness(undistorted))
+        worst = max(
+            [e for e in (result.tick_error_cm, result.sift_error_cm) if not np.isnan(e)]
+            or [np.inf]
         )
+        if worst > args.max_tick_error_cm:
+            print(f"  f{frame.index:05d}: rejected (residual {worst:.2f}cm)")
+            continue
+        if not np.isnan(result.disagreement_cm) and result.disagreement_cm > args.max_disagreement_cm:
+            print(
+                f"  f{frame.index:05d}: rejected (ticks and SIFT disagree by "
+                f"{result.disagreement_cm:.1f}cm -- independent evidence should agree)"
+            )
+            continue
+        candidates.append((frame, result, frames.sharpness(result.undistorted)))
 
     if not candidates:
         print("No frame registered.")
         return 1
 
-    candidates.sort(key=lambda c: -c[6])  # sharpest first
+    candidates.sort(key=lambda c: -c[2])  # sharpest first
     keep = candidates[: args.per_video]
     print(f"\n{len(candidates)} frames registered, keeping {len(keep)}\n")
 
     manifest = []
-    for frame, undistorted, detections, found, solved, worst, sharp in keep:
+    for frame, result, sharp in keep:
+        undistorted = result.undistorted
+        detections = result.detections
+        found = result.ticks
+        solved = result.homography
         stem = f"{source.stem}_f{frame.index:05d}"
         size = (undistorted.shape[1], undistorted.shape[0])
         pose = posemod.estimate(solved.inverse, size)
 
         print(
-            f"{stem}: markers {sorted(d.id for d in detections)} + {len(found)} ticks | "
-            f"tick err {worst:.2f}cm | elevation {pose.elevation_deg:.0f}deg | "
-            f"a 50cm building leans {pose.lean_cm(50):.0f}cm on the ground"
+            f"{stem}: markers {sorted(d.id for d in detections)} + {len(found)} ticks "
+            f"+ {result.sift_points} SIFT pts"
+        )
+        print(
+            f"   residual: ticks {result.tick_error_cm:.2f}cm, SIFT "
+            f"{result.sift_error_cm:.2f}cm | independent sources disagree by "
+            f"{result.disagreement_cm:.2f}cm"
+        )
+        print(
+            f"   elevation {pose.elevation_deg:.0f}deg | a 50cm building leans "
+            f"{pose.lean_cm(50):.0f}cm on the ground"
         )
 
         # --- 1. The requested rectified projection, matching the nadir top view. ---
@@ -193,8 +338,10 @@ def main() -> int:
                 "stem": stem,
                 "marker_ids": sorted(d.id for d in detections),
                 "tick_count": len(found),
-                "max_tick_error_cm": round(worst, 3),
-                "marker_reprojection_rms_cm": round(solved.rms_cm, 3),
+                "sift_points": result.sift_points,
+                "tick_error_cm": round(result.tick_error_cm, 3),
+                "sift_error_cm": round(result.sift_error_cm, 3),
+                "source_disagreement_cm": round(result.disagreement_cm, 3),
                 "homography_image_to_arena_cm": solved.matrix.tolist(),
                 "camera": {
                     "focal_px": round(pose.focal_px, 1),

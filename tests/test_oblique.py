@@ -266,3 +266,115 @@ def test_axis_residuals_measure_the_fit_where_markers_do_not():
 
     assert markers_only.rms_cm < 2.0  # looks healthy
     assert np.abs(axis_residuals(markers_only, constraints)).max() > 2.0  # isn't
+
+
+# --- SIFT against the nadir map: a third, denser, occlusion-proof source ---------
+
+def _synthetic_pair(occlude_marker: int = 1):
+    """One physical arena, shot twice: nadir (all markers) and 45-degree (one buried).
+
+    The occlusion is applied to the OBLIQUE IMAGE, not to the shared canvas. That is
+    how a building actually occludes: it blocks the line of sight from one viewpoint
+    and not another, which is precisely why all four markers are visible in the real
+    nadir footage and only two or three in the 45-degree footage. Painting the canvas
+    instead would take the marker away from both views and quietly destroy the very
+    reference map the test depends on.
+
+    The nadir frame becomes the reference map -- anchored on all four markers, so it
+    carries absolute arena coordinates. The oblique frame then localises against it.
+    """
+    import cv2
+    from mai.arena import Arena
+    from mai.synthetic import CameraPose, capture, render_topdown
+
+    arena = Arena.from_yaml()
+    canvas = render_topdown(arena, px_per_cm=6.0, texture="speckle", seed=11)
+
+    size = (1920, 1080)
+    nadir = capture(
+        arena,
+        pose=CameraPose(250, 200, 320, pitch_deg=1.0, yaw_deg=2.0),
+        image_size=size, distortion=(0, 0, 0, 0, 0),
+        render_px_per_cm=6.0, topdown=canvas,
+    )
+    oblique = capture(
+        arena,
+        pose=CameraPose(250, 200, 260, pitch_deg=42.0, yaw_deg=0.0),
+        image_size=size, focal_px=1100.0, distortion=(0, 0, 0, 0, 0),
+        render_px_per_cm=6.0, topdown=canvas,
+    )
+
+    if occlude_marker is not None:
+        centre = np.array([arena.markers[occlude_marker].center])
+        at = project(oblique.true_world_to_image, centre)[0].astype(int)
+        half = 90
+        cv2.rectangle(
+            oblique.image,
+            (at[0] - half, at[1] - half),
+            (at[0] + half, at[1] + half),
+            (55, 55, 55),
+            -1,
+        )
+    return arena, nadir, oblique
+
+
+def test_sift_map_registers_a_frame_whose_markers_are_buried():
+    """The answer to 'what if the ticks get covered too?'
+
+    Markers and ticks are both SPARSE and individually occludable -- a building already
+    buries one marker. SIFT against the ArUco-anchored nadir map yields hundreds of
+    full correspondences spread over the whole board, and no single obstruction hides
+    hundreds of features. On the real footage it proved to be the MOST reliable of the
+    three sources.
+    """
+    import cv2
+    from mai import aruco, localize, topview
+    from mai.frames import Frame
+    from mai.undistort import CameraProfile, Undistorter
+
+    arena, nadir, oblique = _synthetic_pair(occlude_marker=1)
+    undistorter = Undistorter(
+        CameraProfile(name="s", image_size=(1920, 1080), fx=1100, fy=1100, cx=960, cy=540)
+    )
+    detector = aruco.build_detector(arena.dictionary)
+
+    anchor = topview.register(
+        Frame(nadir.image, 0, "nadir"), arena, undistorter, detector
+    )
+    px_per_cm = topview.native_px_per_cm(arena, anchor.homography)
+    reference = localize.Reference(
+        topview.warp(anchor.undistorted, arena, anchor.homography, px_per_cm),
+        px_per_cm,
+        arena,
+    )
+
+    detections = aruco.detect(oblique.image, detector, keep_ids=set(arena.markers))
+    assert 1 not in [d.id for d in detections]  # genuinely buried
+    assert len(detections) >= 2
+
+    image_points, world_points = aruco.correspondences(detections, arena)
+    seed, _ = cv2.findHomography(
+        image_points.reshape(-1, 1, 2), world_points.reshape(-1, 1, 2)
+    )
+
+    sift_image, sift_arena = localize.ground_correspondences(
+        oblique.image, reference, seed
+    )
+    assert len(sift_image) >= 50  # hundreds, not a handful
+
+    fused = solve_constrained(
+        np.vstack([image_points, sift_image]),
+        np.vstack([world_points, sift_arena]),
+        [],
+        [d.id for d in detections],
+    )
+
+    # Ground truth: project known arena points through the TRUE oblique homography.
+    truth = np.array([[x, y] for x in (60, 250, 440) for y in (100, 200, 300)], float)
+    true_image = project(oblique.true_world_to_image, truth)
+    recovered = fused.to_world(true_image)
+    assert np.linalg.norm(recovered - truth, axis=1).max() < 4.0
+
+    # And every probe still lands in its true zone.
+    for point, back in zip(truth, recovered):
+        assert arena.zone_at(*back) == arena.zone_at(*point)
