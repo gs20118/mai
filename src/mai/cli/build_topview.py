@@ -23,7 +23,13 @@ import numpy as np
 from mai import topview, viz
 from mai.arena import Arena
 from mai.frames import Frame
-from mai.synthetic import CameraPose, PlacedObject, capture, fit_focal_px
+from mai.synthetic import (
+    DEMO_CANVAS_PX_PER_CM,
+    CameraPose,
+    PlacedObject,
+    capture,
+    fit_focal_px,
+)
 from mai.undistort import CameraProfile, Undistorter
 
 # A demo layout so `--synthetic` exercises the same code path real footage will.
@@ -61,6 +67,7 @@ def synthetic_frame(arena: Arena, height_cm: float) -> tuple[Frame, CameraProfil
         image_size=image_size,
         focal_px=focal,
         distortion=distortion,
+        render_px_per_cm=DEMO_CANVAS_PX_PER_CM,
     )
     profile = CameraProfile(
         name="synthetic",

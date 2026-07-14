@@ -30,6 +30,14 @@ _BAND_FILL = {
 # marker's own side length.
 QUIET_ZONE_RATIO = 0.75
 
+# Canvas scale for the demo CLIs. It has to out-resolve the finest capture we
+# simulate, or the "high-resolution" strip pass is just upsampling a canvas with no
+# more detail to give -- the crops would look identical to the top view's and the
+# demo would quietly prove nothing. At 16 px/cm the canvas holds 0.63mm/px, finer
+# than the ~0.8mm/px the strip pass samples at. Tests use a coarser canvas to stay
+# fast, since they assert on geometry rather than on detail.
+DEMO_CANVAS_PX_PER_CM = 16.0
+
 
 @dataclass
 class PlacedObject:
@@ -86,9 +94,25 @@ class SyntheticCapture:
 
 
 def render_topdown(
-    arena: Arena, objects: list[PlacedObject] | None = None, px_per_cm: float = 4.0
+    arena: Arena,
+    objects: list[PlacedObject] | None = None,
+    px_per_cm: float = 4.0,
+    texture: str = "speckle",
+    seed: int = 0,
 ) -> np.ndarray:
-    """Draw the arena straight down: bands, zone markings, ArUco markers, objects."""
+    """Draw the arena straight down: bands, zone markings, ArUco markers, objects.
+
+    `texture` decides whether markerless localisation is even possible, so it is a
+    first-class knob rather than cosmetic:
+
+      "speckle" -- surface grain, as a real 3D-printed / painted diorama has. It is
+                   random, hence APERIODIC, which both gives SIFT something to match
+                   on and breaks the runway's 50cm repetition.
+      "none"    -- a perfectly smooth surface whose only content is the repeating
+                   zone grid and centreline dashes. This is the adversarial case:
+                   featureless AND periodic. Localisation must REFUSE here, not
+                   guess a zone.
+    """
     width = int(round(arena.width_cm * px_per_cm))
     height = int(round(arena.height_cm * px_per_cm))
     canvas = np.full((height, width, 3), 40, dtype=np.uint8)
@@ -103,6 +127,29 @@ def render_topdown(
         )
         # Zone edges: the straight lines the distortion tuner is judged against.
         cv2.rectangle(canvas, to_px(corners[0]), to_px(corners[2]), (200, 200, 200), 1)
+
+    if texture == "speckle":
+        # Texture has to be MULTI-SCALE or the test is meaningless. Fine grain alone
+        # (~1mm) averages away to nothing by the time the top view samples at
+        # ~2.3mm/px, leaving the reference map with almost no features to match
+        # against -- which is what a real smooth surface would also do. Real dioramas
+        # carry structure at several scales: print lines, paint variation, weathering,
+        # scuffs. The coarse component below (~3cm) is what survives downsampling and
+        # so is what markerless localisation actually lives on.
+        rng = np.random.default_rng(seed)
+        fine = rng.normal(0.0, 6.0, (height, width, 1))
+
+        coarse_px = max(int(round(3.0 * px_per_cm)), 2)
+        coarse = rng.normal(
+            0.0, 15.0, (height // coarse_px + 2, width // coarse_px + 2, 1)
+        )
+        coarse = cv2.resize(
+            coarse, (width, height), interpolation=cv2.INTER_LINEAR
+        )[..., None]
+
+        canvas = np.clip(
+            canvas.astype(np.float32) + fine + coarse, 0, 255
+        ).astype(np.uint8)
 
     # Runway centreline dashes, so the render has some texture to feature-match on.
     for zone in arena.runway_zones:
@@ -225,6 +272,26 @@ def fit_focal_px(
     )
 
 
+def fit_focal_for_coverage(
+    coverage_cm: tuple[float, float],
+    pose: CameraPose,
+    image_size: tuple[int, int],
+    margin: float = 0.05,
+) -> float:
+    """Focal length that frames a region of the arena, for a nadir-ish pose.
+
+    Used to plan the high-resolution strip passes. The airfield (RW + TW bands) is
+    only 500x240cm, so two 4:3 stills covering it reach ~12.6 px/cm -- against the
+    ~5-7 px/cm of a whole-arena frame. That is what takes a 28mm cluster munition
+    from ~12px to ~35px. The price is that neither still contains a corner marker.
+    """
+    width_px, height_px = image_size
+    px_per_cm = min(
+        width_px / coverage_cm[0], height_px / coverage_cm[1]
+    ) * (1.0 - margin)
+    return px_per_cm * pose.height_cm
+
+
 def capture(
     arena: Arena,
     pose: CameraPose | None = None,
@@ -233,6 +300,9 @@ def capture(
     focal_px: float | None = None,
     distortion: tuple[float, float, float, float, float] = (-0.28, 0.09, 0.0, 0.0, 0.0),
     render_px_per_cm: float = 8.0,
+    texture: str = "speckle",
+    seed: int = 0,
+    topdown: np.ndarray | None = None,
 ) -> SyntheticCapture:
     """Render the arena, project it through a camera, then barrel-distort it.
 
@@ -240,6 +310,11 @@ def capture(
     a pronounced barrel, far stronger than a real DJI lens after in-camera
     correction. That is on purpose: if the pipeline survives this, mild residual
     distortion will not trouble it.
+
+    Pass an existing `topdown` canvas to shoot several captures of the SAME physical
+    arena. That matters for markerless localisation: a re-rendered canvas would draw
+    a fresh random speckle, so the low pass and the top view would have no shared
+    surface detail to match on -- which is not a property real footage has.
     """
     pose = pose or CameraPose()
     objects = objects or []
@@ -247,7 +322,10 @@ def capture(
     if focal_px is None:
         focal_px = fit_focal_px(arena, pose, image_size)
 
-    topdown = render_topdown(arena, objects, px_per_cm=render_px_per_cm)
+    if topdown is None:
+        topdown = render_topdown(
+            arena, objects, px_per_cm=render_px_per_cm, texture=texture, seed=seed
+        )
 
     camera_matrix = np.array(
         [[focal_px, 0.0, width / 2.0], [0.0, focal_px, height / 2.0], [0.0, 0.0, 1.0]]
