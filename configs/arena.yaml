@@ -9,86 +9,210 @@
 arena:
   width_cm: 500.0
   height_cm: 400.0
-  scale: 600 # 1:600 — multiply cm by this for real-world metres/100
-
-# ------------------------------------------------------------------------------
-# ArUco markers: organizer-provided, one at each arena corner.
-#
-# !! EVERY VALUE BELOW IS A PLACEHOLDER UNTIL MEASURED ON-SITE !!
-#   dictionary      -> confirm with `python -m mai.cli.scan_aruco`
-#   marker_size_cm  -> measure the printed marker's black square edge
-#   center          -> measure each marker's centre in arena cm, origin at the
-#                      top-left corner of the arena, +x right, +y down
-#   rotation_deg    -> clockwise rotation of the marker's own "up" relative to
-#                      arena -y. ArUco returns corners in the marker's canonical
-#                      order regardless of viewing angle, so if a marker is taped
-#                      down rotated, the world corners must be rotated to match
-#                      or the homography silently skews. Leave 0 if unsure and
-#                      check the reprojection RMS.
-# See docs/capture_checklist.md.
-# ------------------------------------------------------------------------------
+  scale: 600
 aruco:
   dictionary: DICT_4X4_50
-  marker_size_cm: 10.0
+  marker_size_cm: 20.7
   markers:
-    # Placeholders: inset 15cm from each corner, since a marker centred exactly on
-    # the corner would hang half off the table. Replace with measured values.
-    0: { center: [15.0, 15.0], rotation_deg: 0 } # top-left
-    1: { center: [485.0, 15.0], rotation_deg: 0 } # top-right
-    2: { center: [485.0, 385.0], rotation_deg: 0 } # bottom-right
-    3: { center: [15.0, 385.0], rotation_deg: 0 } # bottom-left
-
-# ------------------------------------------------------------------------------
-# 26 zones in five 80cm-deep bands: FA / TW-A / RW / TW-B / FA.
-# Each band spans the full 500cm width; the five bands sum to the 400cm depth.
-# ------------------------------------------------------------------------------
+    1:
+      center:
+      - 10.57
+      - 11.41
+      rotation_deg: 0
+    2:
+      center:
+      - 488.4
+      - 11.58
+      rotation_deg: 0
+    3:
+      center:
+      - 10.53
+      - 388.48
+      rotation_deg: 0
+    4:
+      center:
+      - 488.71
+      - 388.61
+      rotation_deg: 0
 zones:
-  # --- Facility row 1 (y 0-80): 160 + 180 + 160 = 500 ---
-  - { id: FA-01, x: 0, y: 0, w: 160, h: 80, band: facility }
-  - { id: FA-02, x: 160, y: 0, w: 180, h: 80, band: facility }
-  - { id: FA-03, x: 340, y: 0, w: 160, h: 80, band: facility }
-
-  # --- Taxiway A (y 80-160): 5 x 100 = 500 ---
-  - { id: TW-A1, x: 0, y: 80, w: 100, h: 80, band: taxiway_a }
-  - { id: TW-A2, x: 100, y: 80, w: 100, h: 80, band: taxiway_a }
-  - { id: TW-A3, x: 200, y: 80, w: 100, h: 80, band: taxiway_a }
-  - { id: TW-A4, x: 300, y: 80, w: 100, h: 80, band: taxiway_a }
-  - { id: TW-A5, x: 400, y: 80, w: 100, h: 80, band: taxiway_a }
-
-  # --- Runway (y 160-240): 10 x 50 = 500. Each zone = 300m real. ---
-  - { id: RW-01, x: 0, y: 160, w: 50, h: 80, band: runway }
-  - { id: RW-02, x: 50, y: 160, w: 50, h: 80, band: runway }
-  - { id: RW-03, x: 100, y: 160, w: 50, h: 80, band: runway }
-  - { id: RW-04, x: 150, y: 160, w: 50, h: 80, band: runway }
-  - { id: RW-05, x: 200, y: 160, w: 50, h: 80, band: runway }
-  - { id: RW-06, x: 250, y: 160, w: 50, h: 80, band: runway }
-  - { id: RW-07, x: 300, y: 160, w: 50, h: 80, band: runway }
-  - { id: RW-08, x: 350, y: 160, w: 50, h: 80, band: runway }
-  - { id: RW-09, x: 400, y: 160, w: 50, h: 80, band: runway }
-  - { id: RW-10, x: 450, y: 160, w: 50, h: 80, band: runway }
-
-  # --- Taxiway B (y 240-320): 5 x 100 = 500 ---
-  - { id: TW-B1, x: 0, y: 240, w: 100, h: 80, band: taxiway_b }
-  - { id: TW-B2, x: 100, y: 240, w: 100, h: 80, band: taxiway_b }
-  - { id: TW-B3, x: 200, y: 240, w: 100, h: 80, band: taxiway_b }
-  - { id: TW-B4, x: 300, y: 240, w: 100, h: 80, band: taxiway_b }
-  - { id: TW-B5, x: 400, y: 240, w: 100, h: 80, band: taxiway_b }
-
-  # --- Facility row 2 (y 320-400): 160 + 180 + 160 = 500 ---
-  - { id: FA-04, x: 0, y: 320, w: 160, h: 80, band: facility }
-  - { id: FA-05, x: 160, y: 320, w: 180, h: 80, band: facility }
-  - { id: FA-06, x: 340, y: 320, w: 160, h: 80, band: facility }
-
-# ------------------------------------------------------------------------------
-# Physical target sizes in mm (TASK.md 8.1 / 8.3). The GSD report uses these to
-# predict how many pixels each target occupies, which is what tells us whether
-# detection is viable at a given altitude. Keys use the dashboard's own class
-# codes, including its misspellings ("misile", "dumb") — TASK.md 12.3.
-# ------------------------------------------------------------------------------
+- id: FA-01
+  x: 0
+  y: 0
+  w: 160
+  h: 80
+  band: facility
+- id: FA-02
+  x: 160
+  y: 0
+  w: 180
+  h: 80
+  band: facility
+- id: FA-03
+  x: 340
+  y: 0
+  w: 160
+  h: 80
+  band: facility
+- id: TW-A1
+  x: 0
+  y: 80
+  w: 100
+  h: 80
+  band: taxiway_a
+- id: TW-A2
+  x: 100
+  y: 80
+  w: 100
+  h: 80
+  band: taxiway_a
+- id: TW-A3
+  x: 200
+  y: 80
+  w: 100
+  h: 80
+  band: taxiway_a
+- id: TW-A4
+  x: 300
+  y: 80
+  w: 100
+  h: 80
+  band: taxiway_a
+- id: TW-A5
+  x: 400
+  y: 80
+  w: 100
+  h: 80
+  band: taxiway_a
+- id: RW-01
+  x: 0
+  y: 160
+  w: 50
+  h: 80
+  band: runway
+- id: RW-02
+  x: 50
+  y: 160
+  w: 50
+  h: 80
+  band: runway
+- id: RW-03
+  x: 100
+  y: 160
+  w: 50
+  h: 80
+  band: runway
+- id: RW-04
+  x: 150
+  y: 160
+  w: 50
+  h: 80
+  band: runway
+- id: RW-05
+  x: 200
+  y: 160
+  w: 50
+  h: 80
+  band: runway
+- id: RW-06
+  x: 250
+  y: 160
+  w: 50
+  h: 80
+  band: runway
+- id: RW-07
+  x: 300
+  y: 160
+  w: 50
+  h: 80
+  band: runway
+- id: RW-08
+  x: 350
+  y: 160
+  w: 50
+  h: 80
+  band: runway
+- id: RW-09
+  x: 400
+  y: 160
+  w: 50
+  h: 80
+  band: runway
+- id: RW-10
+  x: 450
+  y: 160
+  w: 50
+  h: 80
+  band: runway
+- id: TW-B1
+  x: 0
+  y: 240
+  w: 100
+  h: 80
+  band: taxiway_b
+- id: TW-B2
+  x: 100
+  y: 240
+  w: 100
+  h: 80
+  band: taxiway_b
+- id: TW-B3
+  x: 200
+  y: 240
+  w: 100
+  h: 80
+  band: taxiway_b
+- id: TW-B4
+  x: 300
+  y: 240
+  w: 100
+  h: 80
+  band: taxiway_b
+- id: TW-B5
+  x: 400
+  y: 240
+  w: 100
+  h: 80
+  band: taxiway_b
+- id: FA-04
+  x: 0
+  y: 320
+  w: 160
+  h: 80
+  band: facility
+- id: FA-05
+  x: 160
+  y: 320
+  w: 180
+  h: 80
+  band: facility
+- id: FA-06
+  x: 340
+  y: 320
+  w: 160
+  h: 80
+  band: facility
 targets:
-  crater_big: { w_mm: 179.0, d_mm: 200.0, h_mm: 30.0 }
-  crater_medium: { w_mm: 159.0, d_mm: 150.0, h_mm: 23.0 }
-  crater_small: { w_mm: 102.5, d_mm: 99.0, h_mm: 16.0 }
-  uxo_misile: { w_mm: 50.0, d_mm: 50.0, h_mm: 115.0 }
-  uxo_dumb: { w_mm: 44.0, d_mm: 44.0, h_mm: 93.0 }
-  uxo_cluster: { w_mm: 28.0, d_mm: 28.0, h_mm: 20.5 }
+  crater_big:
+    w_mm: 179.0
+    d_mm: 200.0
+    h_mm: 30.0
+  crater_medium:
+    w_mm: 159.0
+    d_mm: 150.0
+    h_mm: 23.0
+  crater_small:
+    w_mm: 102.5
+    d_mm: 99.0
+    h_mm: 16.0
+  uxo_misile:
+    w_mm: 50.0
+    d_mm: 50.0
+    h_mm: 115.0
+  uxo_dumb:
+    w_mm: 44.0
+    d_mm: 44.0
+    h_mm: 93.0
+  uxo_cluster:
+    w_mm: 28.0
+    d_mm: 28.0
+    h_mm: 20.5

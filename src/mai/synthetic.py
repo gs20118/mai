@@ -38,6 +38,12 @@ QUIET_ZONE_RATIO = 0.75
 # fast, since they assert on geometry rather than on detail.
 DEMO_CANVAS_PX_PER_CM = 16.0
 
+# How much floor to render around the arena. The real markers sit with their outer
+# corner flush to the arena corner, so their white quiet zone falls outside the
+# arena entirely -- without this margin they have no light background to be
+# segmented against and none of them decode.
+CANVAS_MARGIN_CM = 30.0
+
 
 @dataclass
 class PlacedObject:
@@ -99,6 +105,7 @@ def render_topdown(
     px_per_cm: float = 4.0,
     texture: str = "speckle",
     seed: int = 0,
+    margin_cm: float = 30.0,
 ) -> np.ndarray:
     """Draw the arena straight down: bands, zone markings, ArUco markers, objects.
 
@@ -113,12 +120,20 @@ def render_topdown(
                    featureless AND periodic. Localisation must REFUSE here, not
                    guess a zone.
     """
-    width = int(round(arena.width_cm * px_per_cm))
-    height = int(round(arena.height_cm * px_per_cm))
-    canvas = np.full((height, width, 3), 40, dtype=np.uint8)
+    # The canvas extends past the arena onto the surrounding floor. That is not
+    # cosmetic: the real markers sit with their outer corner flush to the arena
+    # corner, so their white quiet zone lies OUTSIDE the arena entirely. Render only
+    # the arena and the markers lose the light background they are segmented
+    # against, and none of them decode.
+    width = int(round((arena.width_cm + 2 * margin_cm) * px_per_cm))
+    height = int(round((arena.height_cm + 2 * margin_cm) * px_per_cm))
+    canvas = np.full((height, width, 3), 120, dtype=np.uint8)  # concrete floor
 
     def to_px(point) -> tuple[int, int]:
-        return (int(round(point[0] * px_per_cm)), int(round(point[1] * px_per_cm)))
+        return (
+            int(round((point[0] + margin_cm) * px_per_cm)),
+            int(round((point[1] + margin_cm) * px_per_cm)),
+        )
 
     for zone in arena.zones:
         corners = zone.polygon()
@@ -191,8 +206,12 @@ def render_topdown(
             tile = cv2.warpAffine(
                 tile, rotation, (side_px, side_px), borderValue=(255, 255, 255)
             )
-        x0 = int(round((marker.center[0] - arena.marker_size_cm / 2) * px_per_cm))
-        y0 = int(round((marker.center[1] - arena.marker_size_cm / 2) * px_per_cm))
+        x0, y0 = to_px(
+            (
+                marker.center[0] - arena.marker_size_cm / 2,
+                marker.center[1] - arena.marker_size_cm / 2,
+            )
+        )
         canvas[y0 : y0 + side_px, x0 : x0 + side_px] = tile
 
     for placed in objects or []:
@@ -303,6 +322,7 @@ def capture(
     texture: str = "speckle",
     seed: int = 0,
     topdown: np.ndarray | None = None,
+    margin_cm: float = CANVAS_MARGIN_CM,
 ) -> SyntheticCapture:
     """Render the arena, project it through a camera, then barrel-distort it.
 
@@ -324,7 +344,12 @@ def capture(
 
     if topdown is None:
         topdown = render_topdown(
-            arena, objects, px_per_cm=render_px_per_cm, texture=texture, seed=seed
+            arena,
+            objects,
+            px_per_cm=render_px_per_cm,
+            texture=texture,
+            seed=seed,
+            margin_cm=margin_cm,
         )
 
     camera_matrix = np.array(
@@ -340,21 +365,30 @@ def capture(
     # markers fail to decode for reasons that have nothing to do with the pipeline.
     projected_px_per_cm = focal_px / pose.height_cm
     canvas_px_per_cm = render_px_per_cm
+    canvas_width_cm = arena.width_cm + 2 * margin_cm
+    canvas_height_cm = arena.height_cm + 2 * margin_cm
     if render_px_per_cm > 1.5 * projected_px_per_cm:
         canvas_px_per_cm = 1.5 * projected_px_per_cm
         topdown_for_warp = cv2.resize(
             topdown,
             (
-                max(int(round(arena.width_cm * canvas_px_per_cm)), 1),
-                max(int(round(arena.height_cm * canvas_px_per_cm)), 1),
+                max(int(round(canvas_width_cm * canvas_px_per_cm)), 1),
+                max(int(round(canvas_height_cm * canvas_px_per_cm)), 1),
             ),
             interpolation=cv2.INTER_AREA,
         )
     else:
         topdown_for_warp = topdown
 
-    # The canvas is in px, so undo its scale before projecting through the camera.
-    canvas_to_world = np.diag([1.0 / canvas_px_per_cm, 1.0 / canvas_px_per_cm, 1.0])
+    # Canvas px -> arena cm: undo the canvas scale, then the margin offset (the
+    # canvas origin is on the floor outside the arena, not at the arena corner).
+    canvas_to_world = np.array(
+        [
+            [1.0 / canvas_px_per_cm, 0.0, -margin_cm],
+            [0.0, 1.0 / canvas_px_per_cm, -margin_cm],
+            [0.0, 0.0, 1.0],
+        ]
+    )
     ideal = cv2.warpPerspective(
         topdown_for_warp,
         world_to_image @ canvas_to_world,
