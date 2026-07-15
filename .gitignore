@@ -10,7 +10,6 @@ models/
 *.onnx
 
 .pytest_cache/
-runs/
 *.pt
 
 # secrets — never commit
