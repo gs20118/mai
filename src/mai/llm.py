@@ -84,3 +84,33 @@ def gemini_complete(
     if not text:
         raise RuntimeError("Gemini returned an empty response")
     return text
+
+
+def openai_complete(
+    prompt: str, model: str = "gpt-4o-mini", timeout: float = 20.0
+) -> str:
+    """One OpenAI chat call. Same contract as gemini_complete: returns text or raises.
+
+    gpt-4o-mini is the small, fast, cheap model -- right for rewording one sentence, and (on
+    measurement) much faster than the free-tier Gemini flash. Key auto-loaded from .env.
+    """
+    load_env_file()
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "OPENAI_API_KEY is not set (neither in the environment nor in the local .env)"
+        )
+
+    from openai import OpenAI
+
+    client = OpenAI(api_key=api_key, timeout=timeout)
+    response = client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.3,  # faithful rewording, not creativity
+        max_tokens=256,
+    )
+    text = (response.choices[0].message.content or "").strip()
+    if not text:
+        raise RuntimeError("OpenAI returned an empty response")
+    return text

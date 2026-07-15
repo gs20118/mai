@@ -6,11 +6,12 @@ __pycache__/
 data/
 outputs/
 models/
-*.pt
-*.onnx
 
 .pytest_cache/
-*.pt
+
+/yolo11n.pt
+/yolo11s.pt
+/yolo26n.pt
 
 # secrets — never commit
 .env
