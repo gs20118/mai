@@ -29,6 +29,8 @@ from mai.arena import Arena
 
 CROP_RE = re.compile(r"^(?P<video>top_center_\d+)_f\d+_(?P<zone>[A-Z]{2}-[A-Z]?\d+)$")
 
+PAD_CM = 5.0  # the padding crop_zone used; lets us recover px/cm from the crop width
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -77,6 +79,9 @@ def main() -> int:
             continue
         image = cv2.imread(str(image_path))
         height, width = image.shape[:2]
+        # Scale is recoverable from the crop itself: it was rectified from the zone's
+        # padded rectangle, so px/cm = crop width / (zone width + 2 x pad).
+        px_per_cm = width / (arena.zone(match.group("zone")).w + 2 * PAD_CM)
         for line in text.split("\n"):
             cls, cx, cy, bw, bh = map(float, line.split())
             box = (
@@ -86,7 +91,7 @@ def main() -> int:
                 (cy + bh / 2) * height,
             )
             patch = copypaste.cut(
-                image, box, int(cls), match.group("zone"), image_path.stem
+                image, box, int(cls), match.group("zone"), image_path.stem, px_per_cm
             )
             if patch is not None:
                 bank.append(patch)
@@ -116,6 +121,7 @@ def main() -> int:
             continue
 
         background = cv2.imread(str(image_path))
+        target_ppc = background.shape[1] / (arena.zone(zone_id).w + 2 * PAD_CM)
         existing = (dataset / "labels" / "train" / f"{image_path.stem}.txt").read_text().strip()
 
         for variant in range(args.per_image):
@@ -144,7 +150,9 @@ def main() -> int:
                 # Do not paste an object back into the crop it was cut from.
                 if patch.source == image_path.stem:
                     continue
-                result = placer.paste(canvas, patch, mirror, rng)
+                # Match the destination's scale: the sources were flown at different
+                # altitudes, so a pixel-for-pixel paste changes the object's real size.
+                result = placer.paste(canvas, patch.rescaled_to(target_ppc), mirror, rng)
                 if result is None:
                     continue
                 candidate, box = result

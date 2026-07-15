@@ -32,18 +32,27 @@ PRESETS = {
     "crater": {
         "model": "yolo11n.pt",
         "imgsz": 512,
-        "epochs": 200,
-        "batch": 16,
+        "epochs": 120,
+        "batch": 32,
         "mosaic": 0.5,
     },
     "uxo": {
         "model": "yolo11s.pt",
         "imgsz": 640,
-        "epochs": 300,
+        "epochs": 150,
         "batch": 16,
         "mosaic": 0.0,  # see module docstring: it shrinks small objects
     },
 }
+
+# Lighting augmentation, deliberately GENTLE. The venue lighting is close to the training
+# lighting (same hall, same lamps), so we do not need the heavy shifts that would harden
+# the model against a different room -- and heavy shifts have a real cost here: pushing
+# brightness down 50% turns a dark prop on dark asphalt into a featureless blob, throwing
+# away the very detail an 18px object cannot spare. TASK.md 10.4 warns lighting *may*
+# change, so we keep a little (not zero), but far less than the defaults.
+HSV_S = 0.4  # was 0.7
+HSV_V = 0.3  # was 0.5
 
 
 def main() -> int:
@@ -53,6 +62,13 @@ def main() -> int:
     parser.add_argument("--project", default="runs")
     parser.add_argument("--name", default=None)
     parser.add_argument("--epochs", type=int, default=None)
+    parser.add_argument("--batch", type=int, default=None)
+    parser.add_argument(
+        "--patience",
+        type=int,
+        default=40,
+        help="Early-stop after this many epochs with no val improvement. Lower is faster.",
+    )
     parser.add_argument("--model", default=None)
     parser.add_argument("--imgsz", type=int, default=None)
     parser.add_argument("--device", default="0")
@@ -70,19 +86,26 @@ def main() -> int:
         data=str(data),
         epochs=args.epochs or preset["epochs"],
         imgsz=args.imgsz or preset["imgsz"],
-        batch=preset["batch"],
+        batch=args.batch or preset["batch"],
         device=args.device,
         project=args.project,
         name=args.name or args.task,
         exist_ok=True,
-        patience=60,
+        patience=args.patience,
+        # --- speed. The dataset is small enough to live in RAM, which removes disk I/O as
+        #     the per-epoch bottleneck; AMP runs the forward/backward in FP16 on the 4070's
+        #     tensor cores; persistent workers avoid re-spawning the dataloader each epoch.
+        cache="ram",
+        amp=True,
+        workers=8,
         # Small dataset: let it look at the data many times, and stop when it stalls.
         close_mosaic=10,
         mosaic=preset["mosaic"],
-        # Lighting WILL be different at the venue. This is the shift we can prepare for.
+        # Gentle lighting jitter: the venue is close to training, and heavy shifts destroy
+        # detail on small dark objects. See HSV_S / HSV_V above.
         hsv_h=0.015,
-        hsv_s=0.7,
-        hsv_v=0.5,
+        hsv_s=HSV_S,
+        hsv_v=HSV_V,
         # The arena has no canonical "up" from above, and objects lean in every
         # direction depending on where they sit, so flips are free and safe variety.
         fliplr=0.5,

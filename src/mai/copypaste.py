@@ -53,20 +53,47 @@ DARKNESS_PERCENTILE = 35
 
 @dataclass
 class Patch:
-    """A cut-out object, and the zone whose geometry its lean belongs to."""
+    """A cut-out object, the zone whose geometry its lean belongs to, and its scale."""
 
     image: np.ndarray  # BGR, the tight box
     alpha: np.ndarray  # float 0..1, feathered
     cls: int
     zone_id: str
     source: str
+    px_per_cm: float  # the crop it came from -- NOT the same for every source
 
     @property
     def size(self) -> tuple[int, int]:
         return self.image.shape[1], self.image.shape[0]
 
+    def rescaled_to(self, px_per_cm: float) -> "Patch":
+        """Resize so the object keeps its PHYSICAL size in the destination crop.
 
-def cut(image: np.ndarray, box_xyxy, cls: int, zone_id: str, source: str) -> Patch | None:
+        The sources were flown at different altitudes -- `zones` is 4.92 px/cm and
+        `zones_2` is 5.25 px/cm -- so the same 4cm ball is 20px in one and 21px in the
+        other. Paste pixel-for-pixel across them and every object silently changes size
+        by 7%, which is precisely the cue the size-based reasoning depends on.
+        """
+        factor = px_per_cm / self.px_per_cm
+        if abs(factor - 1.0) < 0.01:
+            return self
+        size = (
+            max(int(round(self.image.shape[1] * factor)), 4),
+            max(int(round(self.image.shape[0] * factor)), 4),
+        )
+        return Patch(
+            image=cv2.resize(self.image, size, interpolation=cv2.INTER_LINEAR),
+            alpha=cv2.resize(self.alpha, size, interpolation=cv2.INTER_LINEAR),
+            cls=self.cls,
+            zone_id=self.zone_id,
+            source=self.source,
+            px_per_cm=px_per_cm,
+        )
+
+
+def cut(
+    image: np.ndarray, box_xyxy, cls: int, zone_id: str, source: str, px_per_cm: float
+) -> Patch | None:
     """Cut an object out of a crop, with a soft alpha matte."""
     x1, y1, x2, y2 = (int(round(v)) for v in box_xyxy)
     height, width = image.shape[:2]
@@ -95,7 +122,14 @@ def cut(image: np.ndarray, box_xyxy, cls: int, zone_id: str, source: str) -> Pat
         return None
 
     alpha = cv2.GaussianBlur(mask, (3, 3), 0)  # feather, or the seam becomes the feature
-    return Patch(image=crop.copy(), alpha=alpha, cls=cls, zone_id=zone_id, source=source)
+    return Patch(
+        image=crop.copy(),
+        alpha=alpha,
+        cls=cls,
+        zone_id=zone_id,
+        source=source,
+        px_per_cm=px_per_cm,
+    )
 
 
 class Placer:
