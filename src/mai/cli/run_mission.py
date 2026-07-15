@@ -45,11 +45,19 @@ def main() -> int:
         help="Defaults to outputs/mission/<video name>/, so runs never overwrite each other.",
     )
     parser.add_argument("--mission-code", default="LKUSDC80")
-    parser.add_argument("--crater-weights", default="runs/detect/runs/crater/weights/best.pt")
+    # The latest models: crater2 (yolo11n) and uxo2_copypaste (yolo11s), both trained on
+    # the SCENE-split dataset that includes zones_3. The old defaults pointed at models
+    # whose validation was leaked; these are the honest ones.
     parser.add_argument(
-        "--uxo-weights", default="runs/detect/runs/uxo_copypaste/weights/best.pt"
+        "--crater-weights", default="runs/detect/runs/crater2/weights/best.pt"
     )
-    parser.add_argument("--conf", type=float, default=0.65)
+    parser.add_argument(
+        "--uxo-weights", default="runs/detect/runs/uxo2_copypaste/weights/best.pt"
+    )
+    # 0.5: the point where the new UXO model holds recall AND precision at 1.000 across
+    # every realistic lighting shift (see mai.cli.stress_lighting). The old 0.65 was
+    # chosen for a weaker model on a harder stress set.
+    parser.add_argument("--conf", type=float, default=0.5)
     parser.add_argument("--sample-sec", type=float, default=0.2)
     parser.add_argument("--max-frames", type=int, default=20)
     parser.add_argument("--max-rms-cm", type=float, default=1.0)
