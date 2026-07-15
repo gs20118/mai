@@ -12,6 +12,31 @@ written to a tracked file, never logged, never included in an error message.
 from __future__ import annotations
 
 import os
+from pathlib import Path
+
+# Project root: src/mai/llm.py -> mai -> src -> root.
+_ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
+
+
+def load_env_file(path: Path = _ENV_FILE) -> None:
+    """Load KEY=VALUE lines from a local .env into the environment, if present.
+
+    So the key lives in one gitignored file and nobody has to `export` it by hand. A value
+    already set in the real environment WINS -- the file is a convenience, not an override,
+    which is what you want on a machine where the key is set for real. The file is never
+    committed (.gitignore) and its contents are never logged.
+    """
+    if not path.exists():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
 
 
 def gemini_complete(
@@ -29,9 +54,12 @@ def gemini_complete(
     free tier also has a low requests-per-minute cap; back-to-back calls can 429, which also
     falls back cleanly. A real mission makes one call, so it does not hit that.)
     """
+    load_env_file()
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        raise RuntimeError("GEMINI_API_KEY is not set in the environment")
+        raise RuntimeError(
+            "GEMINI_API_KEY is not set (neither in the environment nor in the local .env)"
+        )
 
     from google import genai
     from google.genai import types
