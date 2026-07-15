@@ -22,13 +22,14 @@ from __future__ import annotations
 import argparse
 import json
 import time
+from datetime import datetime
 from collections import defaultdict
 from pathlib import Path
 
 import cv2
 import numpy as np
 
-from mai import aruco, frames, homography, sizing, topview, viz, zones
+from mai import aruco, frames, homography, llm, report as report_mod, sizing, topview, viz, zones
 from mai.arena import Arena
 from mai.undistort import CameraProfile, Undistorter
 
@@ -68,6 +69,14 @@ def main() -> int:
         help="A zone counts as occupied if it is seen in this fraction of frames.",
     )
     parser.add_argument("--aruco-scale", type=float, default=0.5)
+    parser.add_argument(
+        "--llm",
+        action="store_true",
+        help="Generate report.json with Gemini (needs GEMINI_API_KEY). Off by default: the "
+        "report still ships from a deterministic template, so the mission never blocks on a "
+        "key and always scores the content points.",
+    )
+    parser.add_argument("--llm-model", default="gemini-flash-latest")
     args = parser.parse_args()
 
     from ultralytics import YOLO
@@ -241,12 +250,22 @@ def main() -> int:
         best = max(best, run)
     available_m = int(best * 50 * arena.scale / 100)
 
-    status = (
-        ("정상", "사용 가능") if available_m >= 2100
-        else ("제한 운용", "제한적 사용 가능") if available_m >= 1500
-        else ("비상 운용", "사용 가능 여부 검토") if available_m >= 900
-        else ("운용 불가", "사용 불가, 폐쇄")
+    # One source for the band table (TASK.md 16.3), shared with the LLM report so the two can
+    # never disagree about the same runway.
+    status = report_mod.status_for(available_m)
+
+    # --- LLM situation report (report.json). Numbers computed above; the model only phrases
+    #     them, and generate_report validates that it did not drop or invent any. Off by
+    #     default so the mission never blocks on an API key.
+    report_inputs = report_mod.ReportInputs.from_mission(
+        when=datetime.now(),
+        runway_crater_count=len(crater_rw),
+        available_m=available_m,
     )
+    client = None
+    if args.llm:
+        client = lambda prompt: llm.gemini_complete(prompt, model=args.llm_model)
+    report_text, report_source = report_mod.generate_report(report_inputs, client=client)
 
     payload = {
         "start.json": {"mission_code": args.mission_code},
@@ -266,6 +285,9 @@ def main() -> int:
             ],
         },
         "uxo_count.json": {"mission_code": args.mission_code, "uxo_count": len(uxo_rw)},
+        # NOTE: the "report" key is a guess -- TASK.md 12.4 gives no report.json example.
+        # Confirm the exact field name with the organizers.
+        "report.json": {"mission_code": args.mission_code, "report": report_text},
     }
     for name, body in payload.items():
         (output / name).write_text(json.dumps(body, ensure_ascii=False, indent=2))
@@ -276,6 +298,7 @@ def main() -> int:
     print(f"runway_status : {available_m} m  -> {status[0]} / {status[1]}")
     print(f"uxo_detect    : {len(uxo)} zones   {[z for z in sorted(uxo, key=lambda z: order[z])]}")
     print(f"uxo_count     : {len(uxo_rw)}  (runway only: {uxo_rw})")
+    print(f"report ({report_source}, {len(report_text)} chars): {report_text}")
 
     # --- QA image: the answers drawn on the arena, so a human can check them ---
     undistorted, solved, px_per_cm, index = best_frame

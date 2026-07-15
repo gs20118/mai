@@ -12,3 +12,6 @@ models/
 .pytest_cache/
 runs/
 *.pt
+
+# secrets — never commit
+.env
